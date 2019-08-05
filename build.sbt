@@ -33,14 +33,14 @@ lazy val IntegrationTest = config("it") extend Test
 
 lazy val root = Project("spark-redshift", file("."))
   .configs(IntegrationTest)
-  .settings(net.virtualvoid.sbt.graph.Plugin.graphSettings: _*)
+//  .settings(net.virtualvoid.sbt.graph.Plugin.graphSettings: _*)
   .settings(Project.inConfig(IntegrationTest)(rawScalastyleSettings()): _*)
   .settings(Defaults.coreDefaultSettings: _*)
   .settings(Defaults.itSettings: _*)
   .settings(
     name := "spark-redshift",
     organization := "io.github.spark_redshift_community",
-    scalaVersion := "2.11.12",
+    scalaVersion := "2.12.4",
     sparkVersion := "2.4.3",
     testSparkVersion := sys.props.get("spark.testVersion").getOrElse(sparkVersion.value),
 

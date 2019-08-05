@@ -6,25 +6,27 @@
 
 # TODO - Should we merge the main SBT script with this library?
 
-if test -z "$HOME"; then
-  declare -r script_dir="$(dirname "$script_path")"
-else
-  declare -r script_dir="$HOME/.sbt"
-fi
-
 declare -a residual_args
 declare -a java_args
 declare -a scalac_args
 declare -a sbt_commands
-declare -a maven_profiles
+declare java_cmd=java
+declare java_version
+declare init_sbt_version="1.0.3"
 
-if test -x "$JAVA_HOME/bin/java"; then
-    echo -e "Using $JAVA_HOME as default JAVA_HOME."
-    echo "Note, this will be overridden by -java-home if it is set."
-    declare java_cmd="$JAVA_HOME/bin/java"
-else
-    declare java_cmd=java
-fi
+declare SCRIPT=$0
+while [ -h "$SCRIPT" ] ; do
+  ls=$(ls -ld "$SCRIPT")
+  # Drop everything prior to ->
+  link=$(expr "$ls" : '.*-> \(.*\)$')
+  if expr "$link" : '/.*' > /dev/null; then
+    SCRIPT="$link"
+  else
+    SCRIPT=$(dirname "$SCRIPT")/"$link"
+  fi
+done
+declare -r sbt_bin_dir="$(dirname "$SCRIPT")"
+declare -r sbt_home="$(dirname "$sbt_bin_dir")"
 
 echoerr () {
   echo 1>&2 "$@"
@@ -36,40 +38,21 @@ dlog () {
   [[ $debug ]] && echoerr "$@"
 }
 
-acquire_sbt_jar () {
-  SBT_VERSION=`awk -F "=" '/sbt\.version/ {print $2}' ./project/build.properties`
-  URL1=http://typesafe.artifactoryonline.com/typesafe/ivy-releases/org.scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch.jar
-  URL2=http://repo.typesafe.com/typesafe/ivy-releases/org.scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch.jar
-  JAR=build/sbt-launch-${SBT_VERSION}.jar
+jar_file () {
+  echo "$(cygwinpath "${sbt_home}/bin/sbt-launch.jar")"
+}
 
-  sbt_jar=$JAR
+acquire_sbt_jar () {
+  sbt_jar="$(jar_file)"
 
   if [[ ! -f "$sbt_jar" ]]; then
-    # Download sbt launch jar if it hasn't been downloaded yet
-    if [ ! -f "${JAR}" ]; then
-    # Download
-    printf "Attempting to fetch sbt\n"
-    JAR_DL="${JAR}.part"
-    if [ $(command -v curl) ]; then
-      (curl --fail --location --silent ${URL1} > "${JAR_DL}" ||\
-        (rm -f "${JAR_DL}" && curl --fail --location --silent ${URL2} > "${JAR_DL}")) &&\
-        mv "${JAR_DL}" "${JAR}"
-    elif [ $(command -v wget) ]; then
-      (wget --quiet ${URL1} -O "${JAR_DL}" ||\
-        (rm -f "${JAR_DL}" && wget --quiet ${URL2} -O "${JAR_DL}")) &&\
-        mv "${JAR_DL}" "${JAR}"
-    else
-      printf "You do not have curl or wget installed, please install sbt manually from http://www.scala-sbt.org/\n"
-      exit -1
-    fi
-    fi
-    if [ ! -f "${JAR}" ]; then
-    # We failed to download
-    printf "Our attempt to download sbt locally to ${JAR} failed. Please install sbt manually from http://www.scala-sbt.org/\n"
-    exit -1
-    fi
-    printf "Launching sbt from ${JAR}\n"
+    echoerr "Could not find launcher jar: $sbt_jar"
+    exit 2
   fi
+}
+
+rt_export_file () {
+  echo "${sbt_bin_dir}/java9-rt-export.jar"
 }
 
 execRunner () {
@@ -85,6 +68,8 @@ execRunner () {
     echo ""
   }
 
+  # THis used to be exec, but we loose the ability to re-hook stty then
+  # for cygwin...  Maybe we should flag the feature here...
   "$@"
 }
 
@@ -92,13 +77,6 @@ addJava () {
   dlog "[addJava] arg = '$1'"
   java_args=( "${java_args[@]}" "$1" )
 }
-
-enableProfile () {
-  dlog "[enableProfile] arg = '$1'"
-  maven_profiles=( "${maven_profiles[@]}" "$1" )
-  export SBT_MAVEN_PROFILES="${maven_profiles[@]}"
-}
-
 addSbt () {
   dlog "[addSbt] arg = '$1'"
   sbt_commands=( "${sbt_commands[@]}" "$1" )
@@ -111,16 +89,47 @@ addDebugger () {
   addJava "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=$1"
 }
 
-# a ham-fisted attempt to move some memory settings in concert
-# so they need not be dicked around with individually.
 get_mem_opts () {
-  local mem=${1:-2048}
-  local perm=$(( $mem / 4 ))
-  (( $perm > 256 )) || perm=256
-  (( $perm < 4096 )) || perm=4096
-  local codecache=$(( $perm / 2 ))
+  # if we detect any of these settings in ${JAVA_OPTS} or ${JAVA_TOOL_OPTIONS} we need to NOT output our settings.
+  # The reason is the Xms/Xmx, if they don't line up, cause errors.
+  if [[ "${JAVA_OPTS}" == *-Xmx* ]] || [[ "${JAVA_OPTS}" == *-Xms* ]] || [[ "${JAVA_OPTS}" == *-XX:MaxPermSize* ]] || [[ "${JAVA_OPTS}" == *-XX:MaxMetaspaceSize* ]] || [[ "${JAVA_OPTS}" == *-XX:ReservedCodeCacheSize* ]]; then
+    echo ""
+  elif [[ "${JAVA_TOOL_OPTIONS}" == *-Xmx* ]] || [[ "${JAVA_TOOL_OPTIONS}" == *-Xms* ]] || [[ "${JAVA_TOOL_OPTIONS}" == *-XX:MaxPermSize* ]] || [[ "${JAVA_TOOL_OPTIONS}" == *-XX:MaxMetaspaceSize* ]] || [[ "${JAVA_TOOL_OPTIONS}" == *-XX:ReservedCodeCacheSize* ]]; then
+    echo ""
+  elif [[ "${SBT_OPTS}" == *-Xmx* ]] || [[ "${SBT_OPTS}" == *-Xms* ]] || [[ "${SBT_OPTS}" == *-XX:MaxPermSize* ]] || [[ "${SBT_OPTS}" == *-XX:MaxMetaspaceSize* ]] || [[ "${SBT_OPTS}" == *-XX:ReservedCodeCacheSize* ]]; then
+    echo ""
+  else
+    # a ham-fisted attempt to move some memory settings in concert
+    # so they need not be messed around with individually.
+    local mem=${1:-1024}
+    local codecache=$(( $mem / 8 ))
+    (( $codecache > 128 )) || codecache=128
+    (( $codecache < 512 )) || codecache=512
+    local class_metadata_size=$(( $codecache * 2 ))
+    local class_metadata_opt=$([[ "$java_version" < "1.8" ]] && echo "MaxPermSize" || echo "MaxMetaspaceSize")
 
-  echo "-Xms${mem}m -Xmx${mem}m -XX:MaxPermSize=${perm}m -XX:ReservedCodeCacheSize=${codecache}m"
+    local arg_xms=$([[ "${java_args[@]}" == *-Xms* ]] && echo "" || echo "-Xms${mem}m")
+    local arg_xmx=$([[ "${java_args[@]}" == *-Xmx* ]] && echo "" || echo "-Xmx${mem}m")
+    local arg_rccs=$([[ "${java_args[@]}" == *-XX:ReservedCodeCacheSize* ]] && echo "" || echo "-XX:ReservedCodeCacheSize=${codecache}m")
+    local arg_meta=$([[ "${java_args[@]}" == *-XX:${class_metadata_opt}* && ! "$java_version" < "1.8" ]] && echo "" || echo "-XX:${class_metadata_opt}=${class_metadata_size}m")
+
+    echo "${arg_xms} ${arg_xmx} ${arg_rccs} ${arg_meta}"
+  fi
+}
+
+get_gc_opts () {
+  local older_than_9="$(echo "$java_version < 9" | bc)"
+
+  if [[ "$older_than_9" == "1" ]]; then
+    # don't need to worry about gc
+    echo ""
+  elif [[ "${JAVA_OPTS}" =~ Use.*GC ]] || [[ "${JAVA_TOOL_OPTIONS}" =~ Use.*GC ]] || [[ "${SBT_OPTS}" =~ Use.*GC ]] ; then
+    # GC arg has been passed in - don't change
+    echo ""
+  else
+    # Java 9+ so revert to old
+    echo "-XX:+UseParallelGC"
+  fi
 }
 
 require_arg () {
@@ -128,7 +137,7 @@ require_arg () {
   local opt="$2"
   local arg="$3"
   if [[ -z "$arg" ]] || [[ "${arg:0:1}" == "-" ]]; then
-    echo "$opt requires <$type> argument" 1>&2
+    echo "$opt requires <$type> argument"
     exit 1
   fi
 }
@@ -151,11 +160,15 @@ process_args () {
 
        -sbt-jar) require_arg path "$1" "$2" && sbt_jar="$2" && shift 2 ;;
    -sbt-version) require_arg version "$1" "$2" && sbt_version="$2" && shift 2 ;;
-     -java-home) require_arg path "$1" "$2" && java_cmd="$2/bin/java" && export JAVA_HOME=$2 && shift 2 ;;
+     -java-home) require_arg path "$1" "$2" &&
+                 java_cmd="$2/bin/java" &&
+                 export JAVA_HOME="$2" &&
+                 export JDK_HOME="$2" &&
+                 export PATH="$2/bin:$PATH" &&
+                 shift 2 ;;
 
-            -D*) addJava "$1" && shift ;;
+          "-D*") addJava "$1" && shift ;;
             -J*) addJava "${1:2}" && shift ;;
-            -P*) enableProfile "$1" && shift ;;
               *) addResidual "$1" && shift ;;
     esac
   done
@@ -165,9 +178,77 @@ process_args () {
     residual_args=()
     process_my_args "${myargs[@]}"
   }
+
+  ## parses 1.7, 1.8, 9, etc out of java version "1.8.0_91"
+  java_version=$("$java_cmd" -Xmx512M -version 2>&1 | grep ' version "' | sed 's/.*version "\([0-9]*\)\(\.[0-9]*\)\{0,1\}\(.*\)*"/\1\2/; 1q')
+  vlog "[process_args] java_version = '$java_version'"
+}
+
+syncPreloaded() {
+  if [[ "$init_sbt_version" == "" ]]; then
+    # FIXME: better $init_sbt_version detection
+    init_sbt_version="$(ls -1 "$sbt_home/lib/local-preloaded/org.scala-sbt/sbt/")"
+  fi
+  [[ -f "$HOME/.sbt/preloaded/org.scala-sbt/sbt/$init_sbt_version/jars/sbt.jar" ]] || {
+    # lib/local-preloaded exists (This is optional)
+    [[ -d "$sbt_home/lib/local-preloaded/" ]] && {
+      command -v rsync >/dev/null 2>&1 && {
+        mkdir -p "$HOME/.sbt/preloaded"
+        rsync -a --ignore-existing "$sbt_home/lib/local-preloaded/" "$HOME/.sbt/preloaded"
+      }
+    }
+  }
+}
+
+# Detect that we have java installed.
+checkJava() {
+  local required_version="$1"
+  # Now check to see if it's a good enough version
+  local good_enough="$(echo "$java_version >= $required_version" | bc)"
+  if [[ "$java_version" == "" ]]; then
+    echo
+    echo No java installations was detected.
+    echo Please go to http://www.java.com/getjava/ and download
+    echo
+    exit 1
+  elif [[ "$good_enough" != "1" ]]; then
+    echo
+    echo The java installation you have is not up to date
+    echo $script_name requires at least version $required_version+, you have
+    echo version $java_version
+    echo
+    echo Please go to http://www.java.com/getjava/ and download
+    echo a valid Java Runtime and install before running $script_name.
+    echo
+    exit 1
+  fi
+}
+
+copyRt() {
+  local at_least_9="$(echo "$java_version >= 9" | bc)"
+  if [[ "$at_least_9" == "1" ]]; then
+    rtexport=$(rt_export_file)
+    java9_ext=$("$java_cmd" ${JAVA_OPTS} ${SBT_OPTS:-$default_sbt_opts} ${java_args[@]} \
+      -jar "$rtexport" --rt-ext-dir)
+    java9_rt=$(echo "$java9_ext/rt.jar")
+    vlog "[copyRt] java9_rt = '$java9_rt'"
+    if [[ ! -f "$java9_rt" ]]; then
+      echo Copying runtime jar.
+      mkdir -p "$java9_ext"
+      execRunner "$java_cmd" \
+        ${JAVA_OPTS} \
+        ${SBT_OPTS:-$default_sbt_opts} \
+        ${java_args[@]} \
+        -jar "$rtexport" \
+        "${java9_rt}"
+    fi
+    addJava "-Dscala.ext.dirs=${java9_ext}"
+  fi
 }
 
 run() {
+  syncPreloaded
+
   # no jar? download it.
   [[ -f "$sbt_jar" ]] || acquire_sbt_jar "$sbt_version" || {
     # still no jar? uh-oh.
@@ -180,13 +261,35 @@ run() {
   set -- "${residual_args[@]}"
   argumentCount=$#
 
+  # TODO - java check should be configurable...
+  checkJava "1.6"
+
+  # Java 9 support
+  copyRt
+
+  #If we're in cygwin, we should use the windows config, and terminal hacks
+  if [[ "$CYGWIN_FLAG" == "true" ]]; then
+    stty -icanon min 1 -echo > /dev/null 2>&1
+    addJava "-Djline.terminal=jline.UnixTerminal"
+    addJava "-Dsbt.cygwin=true"
+  fi
+
   # run sbt
   execRunner "$java_cmd" \
-    ${SBT_OPTS:-$default_sbt_opts} \
     $(get_mem_opts $sbt_mem) \
-    ${java_opts} \
+    $(get_gc_opts) \
+    ${JAVA_OPTS} \
+    ${SBT_OPTS:-$default_sbt_opts} \
     ${java_args[@]} \
     -jar "$sbt_jar" \
     "${sbt_commands[@]}" \
     "${residual_args[@]}"
+
+  exit_code=$?
+
+  # Clean up the terminal from cygwin hacks.
+  if [[ "$CYGWIN_FLAG" == "true" ]]; then
+    stty icanon echo > /dev/null 2>&1
+  fi
+  exit $exit_code
 }
